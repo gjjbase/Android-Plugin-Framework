@@ -45,11 +45,9 @@ public class PluginListActivity extends Activity {
 	@Override
 	protected void onCreate(Bundle savedInstanceState) {
 
-		int skin = PreferenceManager.getDefaultSharedPreferences(this).getInt("shinId", 0);
-
+		String pluginId = "com.example.plugintest";
+		int skin = PreferenceManager.getDefaultSharedPreferences(getApplication()).getInt("shinId", 0);
 		if (skin != 0) {
-			//两个参数：1、插件id，插件主题id
-			String pluginId = "com.example.plugintest";
 			PluginThemeHelper.applyPluginTheme(this, pluginId, skin);
 		}
 
@@ -120,7 +118,7 @@ public class PluginListActivity extends Activity {
 
 				int themeId = PluginThemeHelper.getPluginThemeIdByName(pluginId, "PluginTheme2");
 
-				PreferenceManager.getDefaultSharedPreferences(PluginListActivity.this)
+				PreferenceManager.getDefaultSharedPreferences(getApplication())
 						.edit().putInt("shinId", themeId).commit();
 
 				if (Build.VERSION.SDK_INT >= 11) {
@@ -138,7 +136,7 @@ public class PluginListActivity extends Activity {
 
 				int themeId = PluginThemeHelper.getPluginThemeIdByName(pluginId, "PluginTheme4");
 
-				PreferenceManager.getDefaultSharedPreferences(PluginListActivity.this)
+				PreferenceManager.getDefaultSharedPreferences(getApplication())
 						.edit().putInt("shinId", themeId).commit();
 
 				if (Build.VERSION.SDK_INT >= 11) {
@@ -151,7 +149,7 @@ public class PluginListActivity extends Activity {
 		findViewById(R.id.clear).setOnClickListener(new View.OnClickListener() {
 			@Override
 			public void onClick(View v) {
-				PreferenceManager.getDefaultSharedPreferences(PluginListActivity.this).edit().remove("shinId").commit();
+				PreferenceManager.getDefaultSharedPreferences(getApplication()).edit().remove("shinId").commit();
 				if (Build.VERSION.SDK_INT >= 11) {
 					//重启使主题生效
 					PluginListActivity.this.recreate();

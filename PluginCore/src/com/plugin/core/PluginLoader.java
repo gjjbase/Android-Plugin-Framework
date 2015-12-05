@@ -46,7 +46,8 @@ public class PluginLoader {
 	private static final int SIGNATURES_INVALIDATE = 3;
 	private static final int VERIFY_SIGNATURES_FAIL = 4;
 	private static final int PARSE_MANIFEST_FAIL = 5;
-	private static final int INSTALL_FAIL = 6;
+	private static final int FAIL_BECAUSE_HAS_LOADED = 6;
+	private static final int INSTALL_FAIL = 7;
 
 	private static Application sApplication;
 
@@ -144,7 +145,7 @@ public class PluginLoader {
 			if (FileUtil.copyFile(srcPluginFile, tempFilePath)) {
 				srcPluginFile = tempFilePath;
 			} else {
-				LogUtil.e("复制插件文件失败失败", srcPluginFile, tempFilePath);
+				LogUtil.e("复制插件文件失败", srcPluginFile, tempFilePath);
 				return COPY_FILE_FAIL;
 			}
 		}
@@ -184,15 +185,25 @@ public class PluginLoader {
 		}
 
 		PackageInfo packageInfo = sApplication.getPackageManager().getPackageArchiveInfo(srcPluginFile, PackageManager.GET_GIDS);
-		pluginDescriptor.setApplicationTheme(packageInfo.applicationInfo.theme);
-		pluginDescriptor.setApplicationIcon(packageInfo.applicationInfo.icon);
-		pluginDescriptor.setApplicationLogo(packageInfo.applicationInfo.logo);
+		if (packageInfo != null) {
+			pluginDescriptor.setApplicationTheme(packageInfo.applicationInfo.theme);
+			pluginDescriptor.setApplicationIcon(packageInfo.applicationInfo.icon);
+			pluginDescriptor.setApplicationLogo(packageInfo.applicationInfo.logo);
+		}
 
 		// 第3步，检查插件是否已经存在,若存在删除旧的
 		PluginDescriptor oldPluginDescriptor = getPluginDescriptorByPluginId(pluginDescriptor.getPackageName());
 		if (oldPluginDescriptor != null) {
-			LogUtil.e("已安装过，先删除旧版本", srcPluginFile);
-			remove(pluginDescriptor.getPackageName());
+			LogUtil.e("已安装过，安装路径为", oldPluginDescriptor.getInstalledPath());
+
+			//检查插件是否已经加载
+			if (oldPluginDescriptor.getPluginContext() != null) {
+				LogUtil.e("插件已经加载, 现在不可执行安装操作");
+				return FAIL_BECAUSE_HAS_LOADED;
+			} else {
+				LogUtil.e("先删除已安装的版本");
+				remove(oldPluginDescriptor.getPackageName());
+			}
 		}
 
 		// 第4步骤，复制插件到插件目录
@@ -202,34 +213,55 @@ public class PluginLoader {
 		if (!isCopySuccess) {
 
 			LogUtil.d("复制插件到安装目录失败", srcPluginFile);
+			//删掉临时文件
 			new File(srcPluginFile).delete();
 			return COPY_FILE_FAIL;
 		} else {
 
-			//第5步，复制插件so到插件so目录, 在构造插件Dexclassloader的时候，会使用这个so目录作为参数
+			//第5步，先解压so到临时目录，再从临时目录复制到插件so目录。 在构造插件Dexclassloader的时候，会使用这个so目录作为参数
 			File tempDir = new File(new File(destPluginFile).getParentFile(), "temp");
 			Set<String> soList = FileUtil.unZipSo(srcPluginFile, tempDir);
 			if (soList != null) {
 				for (String soName : soList) {
-					FileUtil.copySo(tempDir, soName, new File(destPluginFile).getParent() + File.separator + "lib");
+					FileUtil.copySo(tempDir, soName, new File(destPluginFile).getParent());
 				}
+				//删掉临时文件
 				FileUtil.deleteAll(tempDir);
 			}
 
 			// 第6步 添加到已安装插件列表
 			pluginDescriptor.setInstalledPath(destPluginFile);
 			boolean isInstallSuccess = pluginManager.addOrReplace(pluginDescriptor);
+			//删掉临时文件
+			new File(srcPluginFile).delete();
 
 			if (!isInstallSuccess) {
-				new File(srcPluginFile).delete();
 				LogUtil.d("安装插件失败", srcPluginFile);
 				return INSTALL_FAIL;
 			} else {
+				//通过创建classloader来触发dexopt，但不加载
+				LogUtil.d("正在进行DEXOPT...", pluginDescriptor.getInstalledPath());
+				PluginCreator.createPluginClassLoader(pluginDescriptor.getInstalledPath(), pluginDescriptor.isStandalone());
+				LogUtil.d("DEXOPT完毕");
+
 				changeListener.onPluginInstalled(pluginDescriptor.getPackageName(), pluginDescriptor.getVersion());
-				LogUtil.d("安装插件成功", srcPluginFile);
+				LogUtil.d("安装插件成功", destPluginFile);
 				return SUCCESS;
 			}
 		}
+	}
+
+	/**
+	 * 通过插件Id唤起插件
+	 * @param pluginId
+	 * @return
+	 */
+	public static PluginDescriptor initPluginByPluginId(String pluginId) {
+		PluginDescriptor pluginDescriptor = getPluginDescriptorByPluginId(pluginId);
+		if (pluginDescriptor != null) {
+			ensurePluginInited(pluginDescriptor);
+		}
+		return pluginDescriptor;
 	}
 
 	/**
@@ -310,7 +342,6 @@ public class PluginLoader {
 	public static Context getDefaultPluginContext(@SuppressWarnings("rawtypes") Class clazz) {
 
 		Context pluginContext = null;
-
 		PluginDescriptor pluginDescriptor = getPluginDescriptorByClassName(clazz.getName());
 
 		if (pluginDescriptor != null) {
@@ -324,33 +355,36 @@ public class PluginLoader {
 		}
 
 		return pluginContext;
-
 	}
 
 	/**
-	 * 根据当前class所在插件的默认Context, 为当前插件Class创建一个单独的context
+	 * 根据当前插件的默认Context, 为当前插件的组件创建一个单独的context
 	 *
-	 * 原因在插件Activity中，每个Activity都应当建立独立的Context，
-	 *
-	 * 而不是都使用同一个defaultContext，避免不同界面的主题和样式互相影响
-	 * 
-	 * @param clazz
+	 * @param pluginContext
+	 * @param base  由系统创建的Context。 其实际类型应该是ContextImpl
 	 * @return
 	 */
-	public static Context getNewPluginContext(@SuppressWarnings("rawtypes") Class clazz) {
-		Context pluginContext = getDefaultPluginContext(clazz);
-
-		return getNewPluginContext(pluginContext);
+	/*package*/ static Context getNewPluginComponentContext(Context pluginContext, Context base) {
+		Context newContext = null;
+		if (pluginContext != null) {
+			newContext = PluginCreator.createPluginContext(((PluginContextTheme) pluginContext).getPluginDescriptor(),
+					base, pluginContext.getResources(),
+					(DexClassLoader) pluginContext.getClassLoader());
+			newContext.setTheme(sApplication.getApplicationContext().getApplicationInfo().theme);
+		}
+		return newContext;
 	}
 
-	public static Context getNewPluginContext(Context pluginContext) {
-		if (pluginContext != null) {
-			pluginContext = PluginCreator.createPluginApplicationContext(((PluginContextTheme)pluginContext).getPluginDescriptor(),
-					sApplication, pluginContext.getResources(),
-					(DexClassLoader) pluginContext.getClassLoader());
-			pluginContext.setTheme(sApplication.getApplicationContext().getApplicationInfo().theme);
+	public static Context getNewPluginApplicationContext(Class clazz) {
+		Context defaultContext = getDefaultPluginContext(clazz);
+		Context newContext = null;
+		if (defaultContext != null) {
+			newContext = PluginCreator.createPluginContext(((PluginContextTheme) defaultContext).getPluginDescriptor(),
+					sApplication, defaultContext.getResources(),
+					(DexClassLoader) defaultContext.getClassLoader());
+			newContext.setTheme(sApplication.getApplicationContext().getApplicationInfo().theme);
 		}
-		return pluginContext;
+		return newContext;
 	}
 
 	/**
@@ -372,7 +406,7 @@ public class PluginLoader {
 				pluginClassLoader = PluginCreator.createPluginClassLoader(pluginDescriptor.getInstalledPath(),
 						pluginDescriptor.isStandalone());
 				Context pluginContext = PluginCreator
-						.createPluginApplicationContext(pluginDescriptor, sApplication, pluginRes, pluginClassLoader);
+						.createPluginContext(pluginDescriptor, sApplication, pluginRes, pluginClassLoader);
 
 				pluginContext.setTheme(sApplication.getApplicationContext().getApplicationInfo().theme);
 				pluginDescriptor.setPluginContext(pluginContext);
@@ -392,11 +426,10 @@ public class PluginLoader {
 
 		Application application = null;
 
-		if (pluginDescriptor.getApplicationName() != null && pluginDescriptor.getPluginApplication() == null
-				&& pluginDescriptor.getPluginClassLoader() != null) {
+		if (pluginDescriptor.getPluginApplication() == null && pluginDescriptor.getPluginClassLoader() != null) {
 			try {
 				LogUtil.d("创建插件Application", pluginDescriptor.getApplicationName());
-				application = Instrumentation.newApplication(pluginDescriptor.getPluginClassLoader().loadClass(pluginDescriptor.getApplicationName()) , sApplication);
+				application = Instrumentation.newApplication(pluginDescriptor.getPluginClassLoader().loadClass(pluginDescriptor.getApplicationName()) , pluginDescriptor.getPluginContext());
 				pluginDescriptor.setPluginApplication(application);
 			} catch (ClassNotFoundException e) {
 				e.printStackTrace();
@@ -407,8 +440,10 @@ public class PluginLoader {
 			}
 		}
 
+		//安装ContentProvider
 		PluginInjector.installContentProviders(sApplication, pluginDescriptor.getProviderInfos().values());
 
+		//执行onCreate
 		if (application != null) {
 			application.onCreate();
 		}
@@ -416,50 +451,10 @@ public class PluginLoader {
 		changeListener.onPluginStarted(pluginDescriptor.getPackageName());
 	}
 
-	/**
-	 * for eclipse & ant with public.xml
-	 *
-	 * unused
-	 * @param pluginDescriptor
-	 * @param res
-	 * @return
-	 */
-	private static boolean checkPluginPublicXml(PluginDescriptor pluginDescriptor, Resources res) {
-
-		// "plugin_layout_1"资源id时由public.xml配置的
-		// 如果没有检测到这个资源，说明编译时没有引入public.xml,
-		// 这里直接抛个异常出去。
-		// 不同的系统版本获取id的方式不同，
-		// 三星4.x等系统适用
-		int publicStub = res.getIdentifier("plugin_layout_1", "layout", pluginDescriptor.getPackageName());
-		if (publicStub == 0) {
-			// 小米5.x等系统适用
-			publicStub = res.getIdentifier("plugin_layout_1", "layout", sApplication.getPackageName());
-		}
-		if (publicStub == 0) {
-			try {
-				// 如果以上两种方式都检测失败，最后尝试通过反射检测
-				Class layoutClass = ((ClassLoader) pluginDescriptor.getPluginClassLoader()).loadClass(pluginDescriptor
-						.getPackageName() + ".R$layout");
-				Integer layouId = (Integer) RefInvoker.getFieldObject(null, layoutClass, "plugin_layout_1");
-				if (layouId != null) {
-					publicStub = layouId;
-				}
-			} catch (ClassNotFoundException e) {
-				e.printStackTrace();
-			}
-		}
-
-		if (publicStub == 0) {
-			throw new IllegalStateException("\n插件工程没有使用public.xml给资源id分组！！！\n" + "插件工程没有使用public.xml给资源id分组！！！\n"
-					+ "插件工程没有使用public.xml给资源id分组！！！\n" + "重要的事情讲三遍！！！");
-		}
-		return true;
-	}
-
 	public static boolean isInstalled(String pluginId, String pluginVersion) {
 		PluginDescriptor pluginDescriptor = getPluginDescriptorByPluginId(pluginId);
 		if (pluginDescriptor != null) {
+			LogUtil.d(pluginId, pluginDescriptor.getVersion(), pluginVersion);
 			return pluginDescriptor.getVersion().equals(pluginVersion);
 		}
 		return false;

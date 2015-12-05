@@ -16,8 +16,11 @@ public class PluginThemeHelper {
 		if (pd != null) {
 			//插件可能尚未初始化，确保使用前已经初始化
 			PluginLoader.ensurePluginInited(pd);
+			if (pd.getPluginContext() != null) {
+				return pd.getPluginContext().getResources().getIdentifier(themeName, "style", pd.getPackageName());
+			}
 		}
-		return pd.getPluginContext().getResources().getIdentifier(themeName, "style", pd.getPackageName());
+		return 0;
 	}
 
 	public static HashMap<String, Integer> getAllPluginThemes(String pluginId) {
@@ -67,7 +70,7 @@ public class PluginThemeHelper {
 
 				//注入插件上下文和主题
 				Context defaultContext = pd.getPluginContext();
-				Context pluginContext = PluginLoader.getNewPluginContext(defaultContext);
+				Context pluginContext = PluginLoader.getNewPluginComponentContext(defaultContext, activity.getBaseContext());
 				PluginInjector.resetActivityContext(pluginContext, activity, themeResId);
 			}
 		}
